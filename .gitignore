@@ -48,3 +48,11 @@ Thumbs.db
 *.mov
 *.wmv
 
+# VSCode
+.vscode/
+
+# npshell
+npshell
+
+# bin
+bin/
