@@ -291,6 +291,9 @@ int shell() {
         getline(cin, input);
 
         commands = splitCommand(input);
+        if (commands.back().cmdList[0] == "exit") {
+            return 0;
+        }
         executeCommand(commands);
     }
 
@@ -319,6 +322,12 @@ int main(int argc, char *argv[]) {
     serverAddr.sin_addr.s_addr = htonl(INADDR_ANY);
     memset(serverAddr.sin_zero, 0, sizeof(serverAddr.sin_zero));
 
+    // Set socket to be reusable
+    int optval = 1;
+    if (setsockopt(serverSocketfd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval)) < 0) {
+        cerr << "Error: server can't set socket to be reusable" << endl;
+    }
+
     // Bind the address struct to the socket
     if (bind(serverSocketfd, (struct sockaddr*)&serverAddr, sizeof(serverAddr)) < 0) {
         cerr << "Error: server can't bind local address" << endl;
@@ -329,7 +338,13 @@ int main(int argc, char *argv[]) {
         cerr << "Error: server can't listen on socket" << endl;
     }
 
+    int storeStd[3];
     while (true) {
+        // Store stdin, stdout, stderr
+        storeStd[0] = dup(STDIN_FILENO);
+        storeStd[1] = dup(STDOUT_FILENO);
+        storeStd[2] = dup(STDERR_FILENO);
+
         // Accept call creates a new socket for the incoming connection
         newSocketfd = accept(serverSocketfd, (struct sockaddr*)&clientAddr, &addr_size);
         if (newSocketfd < 0) {
@@ -342,6 +357,11 @@ int main(int argc, char *argv[]) {
         dup2(newSocketfd, STDERR_FILENO);
 
         shell();
+
+        // Restore stdin, stdout, stderr
+        dup2(storeStd[0], STDIN_FILENO);
+        dup2(storeStd[1], STDOUT_FILENO);
+        dup2(storeStd[2], STDERR_FILENO);
 
         close(newSocketfd);
     }
