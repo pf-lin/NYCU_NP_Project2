@@ -1,5 +1,6 @@
 #include <iostream>
 #include <string>
+#include <cstring>
 #include <sstream>
 #include <vector>
 #include <unistd.h>
@@ -7,6 +8,9 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <fcntl.h>
+#include <sys/socket.h> // add
+#include <netinet/in.h> // add
+#include <arpa/inet.h> // add
 
 using namespace std;
 
@@ -276,7 +280,7 @@ void executeCommand(const vector<CommandInfo>& commands) {
     }
 }
 
-int main() {
+int shell() {
     string input;
     vector<CommandInfo> commands;
 
@@ -288,6 +292,58 @@ int main() {
 
         commands = splitCommand(input);
         executeCommand(commands);
+    }
+
+    return 0;
+}
+
+int main(int argc, char *argv[]) {
+    // initial PATH is bin/ and ./
+    setenv("PATH", "bin:.", 1);
+
+    int serverSocketfd; // master socket file descriptor
+    int newSocketfd; // slave socket file descriptor
+    struct sockaddr_in serverAddr;
+    struct sockaddr_in clientAddr;
+    socklen_t addr_size = sizeof(sockaddr_in);
+
+    // Create the socket
+    serverSocketfd = socket(AF_INET, SOCK_STREAM, 0);
+    if (serverSocketfd < 0) {
+        cerr << "Error: server can't open stream socket" << endl;
+    }
+
+    // Configure settings of the server address struct
+    serverAddr.sin_family = AF_INET;
+    serverAddr.sin_port = htons(atoi(argv[1])); // Convert argv[1] to integer
+    serverAddr.sin_addr.s_addr = htonl(INADDR_ANY);
+    memset(serverAddr.sin_zero, 0, sizeof(serverAddr.sin_zero));
+
+    // Bind the address struct to the socket
+    if (bind(serverSocketfd, (struct sockaddr*)&serverAddr, sizeof(serverAddr)) < 0) {
+        cerr << "Error: server can't bind local address" << endl;
+    }
+
+    // Listen on the socket, with 5 max connection requests queued
+    if (listen(serverSocketfd, 5) < 0) {
+        cerr << "Error: server can't listen on socket" << endl;
+    }
+
+    while (true) {
+        // Accept call creates a new socket for the incoming connection
+        newSocketfd = accept(serverSocketfd, (struct sockaddr*)&clientAddr, &addr_size);
+        if (newSocketfd < 0) {
+            cerr << "Error: server can't accept client connection" << endl;
+        }
+
+        // Redirect stdin, stdout, stderr to the new socket
+        dup2(newSocketfd, STDIN_FILENO);
+        dup2(newSocketfd, STDOUT_FILENO);
+        dup2(newSocketfd, STDERR_FILENO);
+
+        shell();
+
+        close(newSocketfd);
     }
 
     return 0;
