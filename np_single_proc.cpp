@@ -12,6 +12,7 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <sys/select.h> // add
+#include <map> // add
 
 using namespace std;
 
@@ -35,8 +36,19 @@ struct Process {
     int *from = nullptr;
 };
 
+struct UserInfo {
+    bool isLogin; // check if the user is login
+    int id; // range from 1 to 30
+    string name;
+    string ipPort;
+    int fd;
+    map<string, string> env; // [var] [value] (e.g. [PATH] [bin:.])
+};
+
 int cmdCount = 0; // count the number of commands
 vector<NumberedPipe> numPipeList = {}; // store numbered pipe
+const int maxUser = 30;
+vector<UserInfo> userList(maxUser + 1); // store user information
 
 const string welcomeMessage = "****************************************\n"
                               "** Welcome to the information server. **\n"
@@ -340,6 +352,61 @@ int passiveTCP(int port) {
     return serverSocketfd;
 }
 
+void initUserInfos(int idx) {
+    userList[idx].isLogin = false;
+    userList[idx].id = 0;
+    userList[idx].name = "(no name)";
+    userList[idx].ipPort = "";
+    userList[idx].fd = -1;
+    userList[idx].env.clear();
+    userList[idx].env["PATH"] = "bin:.";
+}
+
+void userLogin(int msock, fd_set& afds) {
+    // Accept the new connection
+    struct sockaddr_in clientAddr;
+    socklen_t clientAddrLen = sizeof(clientAddr);
+    int ssock = accept(msock, (struct sockaddr*)&clientAddr, &clientAddrLen);
+    if (ssock < 0) {
+        cerr << "Failed to accept the new connection" << endl;
+    }
+    // Add the new client socket to the file descriptor set
+    FD_SET(ssock, &afds);
+
+    // Get the client IP address and port
+    char ipBuf[INET_ADDRSTRLEN];
+    string ip = inet_ntoa(clientAddr.sin_addr);
+    string clientIP = inet_ntop(AF_INET, &clientAddr.sin_addr, ipBuf, sizeof(clientIP));
+    string clientPort = to_string(ntohs(clientAddr.sin_port));
+
+    write(ssock, welcomeMessage.c_str(), welcomeMessage.size());
+
+    // Find the first available user slot
+    for (int idx = 1; idx <= maxUser; idx++) {
+        if (!userList[idx].isLogin) {
+            userList[idx].isLogin = true;
+            userList[idx].id = idx;
+            userList[idx].ipPort = clientIP + ":" + clientPort;
+            userList[idx].fd = ssock;
+
+            string msg = "*** User '" + userList[idx].name + "' entered from " + userList[idx].ipPort + ". ***\n";
+            broadcastMessage(msg);
+            break;
+        }
+    }
+
+    // Print the command line prompt
+    write(ssock, "% ", 2);
+}
+
+void broadcastMessage(const string& msg) {
+    for (int idx = 1; idx <= maxUser; idx++) {
+        if (userList[idx].isLogin) {
+            write(userList[idx].fd, msg.c_str(), msg.size());
+        }
+    }
+}
+
 int main(int argc, char *argv[]) {
     // initial PATH is bin/ and ./
     setenv("PATH", "bin:.", 1);
@@ -353,6 +420,11 @@ int main(int argc, char *argv[]) {
     FD_ZERO(&afds);
     FD_SET(msock, &afds);
 
+    // initial user information
+    for (int i = 1; i <= maxUser; i++) {
+        initUserInfos(i);
+    }
+
     int storeStd[3];
     while (true) {
         // Store stdin, stdout, stderr
@@ -364,26 +436,13 @@ int main(int argc, char *argv[]) {
         memcpy(&rfds, &afds, sizeof(rfds)); // copy afds to rfds
 
         // Wait for activity on any of the sockets
-        if (select(nfds, &rfds, NULL, NULL, NULL) < 0) { //直到有訊息進來才會繼續 (system call)
+        if (select(nfds, &rfds, NULL, NULL, NULL) < 0) { // 直到有訊息進來才會繼續 (system call)
             cerr << "Error in select" << endl;
         }
 
         // Check if there is a new incoming connection
         if (FD_ISSET(msock, &rfds)) {
-            // Accept the new connection
-            struct sockaddr_in clientAddr;
-            socklen_t clientAddrLen = sizeof(clientAddr);
-            int ssock = accept(msock, (struct sockaddr*)&clientAddr, &clientAddrLen);
-            if (ssock < 0) {
-                cerr << "Failed to accept the new connection" << endl;
-            }
-            // Add the new client socket to the file descriptor set
-            FD_SET(ssock, &afds);
-
-            // Get the client IP address and port
-            char ipBuf[INET_ADDRSTRLEN];
-            string clientIP = inet_ntop(AF_INET, &clientAddr.sin_addr, ipBuf, sizeof(clientIP));
-            string clientPort = to_string(ntohs(clientAddr.sin_port));
+            userLogin(msock, afds);
         }
 
         // Check for activity on client sockets
