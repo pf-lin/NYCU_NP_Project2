@@ -16,6 +16,9 @@
 
 using namespace std;
 
+#define MAXBUFSIZE 15000
+#define MAXUSER 30
+
 struct NumberedPipe {
     int pipeCmdId; // the command id that the numbered pipe is connected to
     int numPipefd[2];
@@ -43,19 +46,19 @@ struct UserInfo {
     string ipPort;
     int fd;
     map<string, string> env; // [var] [value] (e.g. [PATH] [bin:.])
+
+    int cmdCount; // count the number of commands
+    vector<NumberedPipe> numPipeList; // store numbered pipe
 };
 
-int cmdCount = 0; // count the number of commands
-vector<NumberedPipe> numPipeList = {}; // store numbered pipe
-const int maxUser = 30;
-vector<UserInfo> userList(maxUser + 1); // store user information
+vector<UserInfo> userList(MAXUSER + 1); // store user information
 
 const string welcomeMessage = "****************************************\n"
                               "** Welcome to the information server. **\n"
                               "****************************************\n";
 
 // Use number pipe to classify cmd
-vector<CommandInfo> splitCommand(const string& command) {
+vector<CommandInfo> splitCommand(UserInfo* user, const string& command) {
     // Split the command by ' ' (space)
     vector<string> cmdSplitList;
     string token;
@@ -72,7 +75,7 @@ vector<CommandInfo> splitCommand(const string& command) {
     for (int i = 0; i < cmdSplitList.size(); i++) {
         if ((cmdSplitList[i][0] == '|' || cmdSplitList[i][0] == '!') && cmdSplitList[i].size() > 1) {
             CommandInfo cmdInfo;
-            cmdInfo.cmdId = cmdCount++;
+            cmdInfo.cmdId = user->cmdCount++;
             while (splitIndex <= i) {
                 cmdInfo.cmdList.push_back(cmdSplitList[splitIndex]);
                 splitIndex++;
@@ -82,7 +85,7 @@ vector<CommandInfo> splitCommand(const string& command) {
     }
     if (splitIndex < cmdSplitList.size()) {
         CommandInfo cmdInfo;
-        cmdInfo.cmdId = cmdCount++;
+        cmdInfo.cmdId = user->cmdCount++;
         while (splitIndex < cmdSplitList.size()) {
             cmdInfo.cmdList.push_back(cmdSplitList[splitIndex]);
             splitIndex++;
@@ -192,16 +195,16 @@ void execute(const Process& process) {
 }
 
 // Find if there is a number pipe to pass to this command
-int findPipeCmdId(const vector<CommandInfo>& commands, int i) {
-    for (int np = 0; np < numPipeList.size(); np++) {
-        if (numPipeList[np].pipeCmdId == commands[i].cmdId) {
+int findPipeCmdId(UserInfo* user, const vector<CommandInfo>& commands, int i) {
+    for (int np = 0; np < user->numPipeList.size(); np++) {
+        if (user->numPipeList[np].pipeCmdId == commands[i].cmdId) {
             return np;
         }
     }
     return -1;
 }
 
-void executeProcess(vector<Process>& processList, int cmdId, bool isNumPipeInput, int numPipeIndex) {
+void executeProcess(UserInfo* user, vector<Process>& processList, int cmdId, bool isNumPipeInput, int numPipeIndex) {
     pid_t pid;
     int pipefd[2][2]; // pipefd[0] for odd process, pipefd[1] for even process
     for (int j = 0; j < processList.size(); j++) { // for each process
@@ -209,9 +212,9 @@ void executeProcess(vector<Process>& processList, int cmdId, bool isNumPipeInput
             int numPipeCmdId = cmdId + processList[j].pipeNumber;
 
             // check if a numbered pipe connected to the same command has been established
-            for (int np = 0; np < numPipeList.size(); np++) {
-                if (numPipeList[np].pipeCmdId == numPipeCmdId) {
-                    processList[j].to = numPipeList[np].numPipefd;
+            for (int np = 0; np < user->numPipeList.size(); np++) {
+                if (user->numPipeList[np].pipeCmdId == numPipeCmdId) {
+                    processList[j].to = user->numPipeList[np].numPipefd;
                     break;
                 }
             }
@@ -221,12 +224,12 @@ void executeProcess(vector<Process>& processList, int cmdId, bool isNumPipeInput
                 NumberedPipe numPipe;
                 numPipe.pipeCmdId = numPipeCmdId;
                 pipe(numPipe.numPipefd);
-                numPipeList.push_back(numPipe);
-                processList[j].to = numPipeList[numPipeList.size() - 1].numPipefd;
+                user->numPipeList.push_back(numPipe);
+                processList[j].to = user->numPipeList[user->numPipeList.size() - 1].numPipefd;
             }
         }
         if (j == 0 && isNumPipeInput/* There is a number pipe to write to*/) {
-            processList[j].from = numPipeList[numPipeIndex].numPipefd; // read from number pipe
+            processList[j].from = user->numPipeList[numPipeIndex].numPipefd; // read from number pipe
         }
         if (j > 0) {
             processList[j].from = pipefd[(j - 1) % 2];
@@ -249,6 +252,9 @@ void executeProcess(vector<Process>& processList, int cmdId, bool isNumPipeInput
                     dup2(process.to[1], STDERR_FILENO);
                 }
                 close(process.to[1]);
+            } else { // if the process is the last one
+                dup2(STDOUT_FILENO, user->fd);
+                dup2(STDERR_FILENO, user->fd);
             }
             if (process.from != nullptr) {
                 close(process.from[1]);
@@ -261,8 +267,8 @@ void executeProcess(vector<Process>& processList, int cmdId, bool isNumPipeInput
             while (waitpid(-1, NULL, WNOHANG)); // wait for all child processes to finish (non-blocking waitpid())
 
             if (j == 0 && isNumPipeInput) { // close number pipe
-                close(numPipeList[numPipeIndex].numPipefd[0]);
-                close(numPipeList[numPipeIndex].numPipefd[1]);
+                close(user->numPipeList[numPipeIndex].numPipefd[0]);
+                close(user->numPipeList[numPipeIndex].numPipefd[1]);
             }
             if (j > 0) { // close pipe
                 close(pipefd[(j - 1) % 2][0]);
@@ -279,7 +285,7 @@ void executeProcess(vector<Process>& processList, int cmdId, bool isNumPipeInput
 }
 
 // Function to execute each command
-void executeCommand(const vector<CommandInfo>& commands) {
+void executeCommand(UserInfo* user, const vector<CommandInfo>& commands) {
     for (int i = 0; i < commands.size(); i++) { // for each command
         if (build_in_command(commands[i])) {
             continue;
@@ -288,31 +294,50 @@ void executeCommand(const vector<CommandInfo>& commands) {
         vector<Process> processList = parseCommand(commands[i]);
 
         bool isNumPipeInput = false;
-        int numPipeIndex = findPipeCmdId(commands, i);
+        int numPipeIndex = findPipeCmdId(user, commands, i);
         if (numPipeIndex != -1) {
             isNumPipeInput = true;
         }
 
-        executeProcess(processList, commands[i].cmdId, isNumPipeInput, numPipeIndex);
+        executeProcess(user, processList, commands[i].cmdId, isNumPipeInput, numPipeIndex);
     }
 }
 
-int shell() {
-    string input;
+int getUserIndex(int fd) {
+    for (int idx = 1; idx <= MAXUSER; idx++) {
+        if (userList[idx].fd == fd) {
+            return idx;
+        }
+    }
+    return -1;
+}
+
+int shell(int fd) {
+    char buf[MAXBUFSIZE];
+    memset(buf, 0, sizeof(buf));
+    read(fd, buf, sizeof(buf));
+
+    string input(buf);
     vector<CommandInfo> commands;
+
+    // Redirect stdout, stderr
+    dup2(fd, STDOUT_FILENO);
+    dup2(fd, STDERR_FILENO);
+
+    // Get the current user
+    int userIndex = getUserIndex(fd);
+    UserInfo* user = &userList.at(userIndex);
 
     setenv("PATH", "bin:.", 1); // initial PATH is bin/ and ./
 
-    while (true) {
-        cout << "% "; // Use "% " as the command line prompt.
-        getline(cin, input);
-
-        commands = splitCommand(input);
-        if (commands.back().cmdList[0] == "exit") {
-            return 0;
-        }
-        executeCommand(commands);
+    commands = splitCommand(user, input);
+    if (commands.back().cmdList[0] == "exit") {
+        return -1;
     }
+    executeCommand(user, commands);
+
+    // Print the command line prompt
+    write(fd, "% ", 2);
 
     return 0;
 }
@@ -345,7 +370,7 @@ int passiveTCP(int port) {
     }
 
     // Listen on the socket
-    if (listen(serverSocketfd, 5) < 0) {
+    if (listen(serverSocketfd, MAXUSER) < 0) {
         cerr << "Error: server can't listen on socket" << endl;
     }
 
@@ -360,6 +385,16 @@ void initUserInfos(int idx) {
     userList[idx].fd = -1;
     userList[idx].env.clear();
     userList[idx].env["PATH"] = "bin:.";
+    userList[idx].cmdCount = 0;
+    userList[idx].numPipeList.clear();
+}
+
+void broadcastMessage(const string& msg) {
+    for (int idx = 1; idx <= MAXUSER; idx++) {
+        if (userList[idx].isLogin) {
+            write(userList[idx].fd, msg.c_str(), msg.size());
+        }
+    }
 }
 
 void userLogin(int msock, fd_set& afds) {
@@ -382,7 +417,7 @@ void userLogin(int msock, fd_set& afds) {
     write(ssock, welcomeMessage.c_str(), welcomeMessage.size());
 
     // Find the first available user slot
-    for (int idx = 1; idx <= maxUser; idx++) {
+    for (int idx = 1; idx <= MAXUSER; idx++) {
         if (!userList[idx].isLogin) {
             userList[idx].isLogin = true;
             userList[idx].id = idx;
@@ -399,14 +434,6 @@ void userLogin(int msock, fd_set& afds) {
     write(ssock, "% ", 2);
 }
 
-void broadcastMessage(const string& msg) {
-    for (int idx = 1; idx <= maxUser; idx++) {
-        if (userList[idx].isLogin) {
-            write(userList[idx].fd, msg.c_str(), msg.size());
-        }
-    }
-}
-
 int main(int argc, char *argv[]) {
     // initial PATH is bin/ and ./
     setenv("PATH", "bin:.", 1);
@@ -414,24 +441,25 @@ int main(int argc, char *argv[]) {
     int msock = passiveTCP(atoi(argv[1]));
 
     // Set up the file descriptor set for select
-    int nfds = getdtablesize();
+    // int nfds = getdtablesize(); // get the maximum number of file descriptors (根據系統而定)
+    int nfds = FD_SETSIZE; // 1024
     fd_set rfds;
     fd_set afds;
     FD_ZERO(&afds);
     FD_SET(msock, &afds);
 
     // initial user information
-    for (int i = 1; i <= maxUser; i++) {
+    for (int i = 1; i <= MAXUSER; i++) {
         initUserInfos(i);
     }
 
+    // Store stdin, stdout, stderr
     int storeStd[3];
+    storeStd[0] = dup(STDIN_FILENO);
+    storeStd[1] = dup(STDOUT_FILENO);
+    storeStd[2] = dup(STDERR_FILENO);
+
     while (true) {
-        // Store stdin, stdout, stderr
-        storeStd[0] = dup(STDIN_FILENO);
-        storeStd[1] = dup(STDOUT_FILENO);
-        storeStd[2] = dup(STDERR_FILENO);
-        
         // Copy the file descriptor set
         memcpy(&rfds, &afds, sizeof(rfds)); // copy afds to rfds
 
@@ -450,11 +478,18 @@ int main(int argc, char *argv[]) {
             if (fd != msock && FD_ISSET(fd, &rfds)) {
                 // TODO: Read the command from the client socket
                 // run shell
-                shell();
-
-                // Close the client socket if necessary
-                close(fd);
-                FD_CLR(fd, &afds);
+                int status = shell(fd);
+                if (status == -1) { // exit
+                    // Find the user index
+                    int userIndex = getUserIndex(fd);
+                    if (userIndex != -1) {
+                        string msg = "*** User '" + userList[userIndex].name + "' left. ***\n";
+                        broadcastMessage(msg);
+                        initUserInfos(userIndex);
+                    }
+                    close(fd);
+                    FD_CLR(fd, &afds);
+                }
             }
         }
 
