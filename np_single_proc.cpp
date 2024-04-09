@@ -18,6 +18,7 @@ using namespace std;
 
 #define MAXBUFSIZE 15000
 #define MAXUSER 30
+#define PROMPT "% "
 
 struct NumberedPipe {
     int pipeCmdId; // the command id that the numbered pipe is connected to
@@ -56,6 +57,15 @@ vector<UserInfo> userList(MAXUSER + 1); // store user information
 const string welcomeMessage = "****************************************\n"
                               "** Welcome to the information server. **\n"
                               "****************************************\n";
+
+// Function to broadcast message to all users
+void broadcastMessage(const string& msg) {
+    for (int idx = 1; idx <= MAXUSER; idx++) {
+        if (userList[idx].isLogin) {
+            write(userList[idx].fd, msg.c_str(), msg.size());
+        }
+    }
+}
 
 // Use number pipe to classify cmd
 vector<CommandInfo> splitCommand(UserInfo* user, const string& command) {
@@ -138,13 +148,14 @@ vector<Process> parseCommand(const CommandInfo& cmdInfo) {
     return processList;
 }
 
-bool build_in_command(const CommandInfo& cmdInfo) {
+bool built_in_command(UserInfo* user, const CommandInfo& cmdInfo) {
     if (cmdInfo.cmdList[0] == "setenv") {
         // TODO: input validation (not in spec but better to have it) -- by newb1er
         if (cmdInfo.cmdList.size() != 3) {
             cerr << "Invalid number of arguments for setenv command." << endl;
             return false;
         }
+        user->env[cmdInfo.cmdList[1]] = cmdInfo.cmdList[2];
         setenv(cmdInfo.cmdList[1].c_str(), cmdInfo.cmdList[2].c_str(), 1);
     }
     else if (cmdInfo.cmdList[0] == "printenv") {
@@ -155,11 +166,68 @@ bool build_in_command(const CommandInfo& cmdInfo) {
         }
         const char* env = getenv(cmdInfo.cmdList[1].c_str());
         if (env != NULL) {
-            cout << env << endl;
+            string msg = env + string("\n");
+            write(user->fd, msg.c_str(), msg.size());
         }
     }
     else if (cmdInfo.cmdList[0] == "exit") {
         exit(0);
+    }
+    else if (cmdInfo.cmdList[0] == "who") {
+        string msg = "<ID>\t<nickname>\t<IP:port>\t<indicate me>\n";
+        for (int idx = 1; idx <= MAXUSER; idx++) {
+            if (userList[idx].isLogin) {
+                msg += to_string(userList[idx].id) + "\t" + userList[idx].name + "\t" + userList[idx].ipPort;
+                if (idx == user->id) {
+                    msg += "\t<-me";
+                }
+                msg += "\n";
+            }
+        }
+        write(user->fd, msg.c_str(), msg.size());
+    }
+    else if (cmdInfo.cmdList[0] == "tell") {
+        int targetId = stoi(cmdInfo.cmdList[1]);
+        string msg = "";
+        if (!userList[targetId].isLogin) { // the target user does not exist
+            msg += "*** Error: user #" + to_string(targetId) + " does not exist yet. ***\n";
+            write(user->fd, msg.c_str(), msg.size());
+        } else { // send message to target user
+            msg += "*** " + user->name + " told you ***: ";
+            for (int i = 2; i < cmdInfo.cmdList.size(); i++) {
+                msg += cmdInfo.cmdList[i];
+                if (i != cmdInfo.cmdList.size() - 1) {
+                    msg += " ";
+                }
+            }
+            msg += "\n";
+            write(userList[targetId].fd, msg.c_str(), msg.size());
+        }
+    }
+    else if (cmdInfo.cmdList[0] == "yell") {
+        string msg = "*** " + user->name + " yelled ***: ";
+        for (int i = 1; i < cmdInfo.cmdList.size(); i++) {
+            msg += cmdInfo.cmdList[i];
+            if (i != cmdInfo.cmdList.size() - 1) {
+                msg += " ";
+            }
+        }
+        msg += "\n";
+        broadcastMessage(msg);
+    }
+    else if (cmdInfo.cmdList[0] == "name") {
+        bool isNameExist = false;
+        for (int idx = 1; idx <= MAXUSER; idx++) {
+            if (userList[idx].isLogin && userList[idx].name == cmdInfo.cmdList[1]) {
+                cout << "*** User '" << cmdInfo.cmdList[1] << "' already exists. ***" << endl;
+                isNameExist = true;
+            }
+        }
+        if (!isNameExist) {
+            user->name = cmdInfo.cmdList[1];
+            string msg = "*** User from " + user->ipPort + " is named '" + user->name + "'. ***\n";
+            broadcastMessage(msg);
+        }
     }
     else {
         return false;
@@ -287,7 +355,7 @@ void executeProcess(UserInfo* user, vector<Process>& processList, int cmdId, boo
 // Function to execute each command
 void executeCommand(UserInfo* user, const vector<CommandInfo>& commands) {
     for (int i = 0; i < commands.size(); i++) { // for each command
-        if (build_in_command(commands[i])) {
+        if (built_in_command(user, commands[i])) {
             continue;
         }
         
@@ -315,7 +383,9 @@ int getUserIndex(int fd) {
 int shell(int fd) {
     char buf[MAXBUFSIZE];
     memset(buf, 0, sizeof(buf));
-    read(fd, buf, sizeof(buf));
+    if (read(fd, buf, sizeof(buf)) < 0) {
+        cerr << "Error: failed to read from client" << endl;
+    }
 
     string input(buf);
     vector<CommandInfo> commands;
@@ -328,16 +398,28 @@ int shell(int fd) {
     int userIndex = getUserIndex(fd);
     UserInfo* user = &userList.at(userIndex);
 
-    setenv("PATH", "bin:.", 1); // initial PATH is bin/ and ./
+    // Clear the environment variables
+    clearenv();
+    // Set the environment variables for the user
+    for (auto& env : user->env) {
+        setenv(env.first.c_str(), env.second.c_str(), 1);
+    }
 
+    // Split the command by number pipe and error pipe
     commands = splitCommand(user, input);
-    if (commands.back().cmdList[0] == "exit") {
+
+    if (commands.empty()) { // empty command ("")
+        write(fd, PROMPT, strlen(PROMPT)); // %
+        return 0;
+    }
+    else if (commands.back().cmdList[0] == "exit") {
         return -1;
     }
+
     executeCommand(user, commands);
 
     // Print the command line prompt
-    write(fd, "% ", 2);
+    write(fd, PROMPT, strlen(PROMPT)); // %
 
     return 0;
 }
@@ -384,17 +466,9 @@ void initUserInfos(int idx) {
     userList[idx].ipPort = "";
     userList[idx].fd = -1;
     userList[idx].env.clear();
-    userList[idx].env["PATH"] = "bin:.";
+    userList[idx].env["PATH"] = "bin:."; // initial PATH is bin/ and ./
     userList[idx].cmdCount = 0;
     userList[idx].numPipeList.clear();
-}
-
-void broadcastMessage(const string& msg) {
-    for (int idx = 1; idx <= MAXUSER; idx++) {
-        if (userList[idx].isLogin) {
-            write(userList[idx].fd, msg.c_str(), msg.size());
-        }
-    }
 }
 
 void userLogin(int msock, fd_set& afds) {
@@ -431,14 +505,13 @@ void userLogin(int msock, fd_set& afds) {
     }
 
     // Print the command line prompt
-    write(ssock, "% ", 2);
+    write(ssock, PROMPT, strlen(PROMPT)); // %
 }
 
 int main(int argc, char *argv[]) {
-    // initial PATH is bin/ and ./
-    setenv("PATH", "bin:.", 1);
-    
+    // Create a passive TCP socket and get its file descriptor (msock)
     int msock = passiveTCP(atoi(argv[1]));
+    // int msock = passiveTCP(7000); // for testing
 
     // Set up the file descriptor set for select
     // int nfds = getdtablesize(); // get the maximum number of file descriptors (根據系統而定)
