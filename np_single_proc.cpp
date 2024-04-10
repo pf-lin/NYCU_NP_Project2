@@ -52,8 +52,16 @@ struct UserInfo {
     vector<NumberedPipe> numPipeList; // store numbered pipe
 };
 
-vector<UserInfo> userList(MAXUSER + 1); // store user information
+struct UserPipe {
+    int fromId; // sender
+    int toId; // receiver
+    int userPipefd[2];
+};
 
+vector<UserInfo> userList(MAXUSER + 1); // store user information
+vector<UserPipe> userPipeList; // store user pipe
+
+int fd_null[2]; // for /dev/null
 const string welcomeMessage = "****************************************\n"
                               "** Welcome to the information server. **\n"
                               "****************************************\n";
@@ -65,6 +73,113 @@ void broadcastMessage(const string& msg) {
             write(userList[idx].fd, msg.c_str(), msg.size());
         }
     }
+}
+
+// Function to handle user pipe message
+tuple<bool, int> userPipeMessage(UserInfo* user, const CommandInfo& cmdInfo, Process* process) {
+    // combine the split command
+    string cmd = "";
+    for (int i = 0; i < cmdInfo.cmdList.size(); i++) {
+        cmd += cmdInfo.cmdList[i];
+        if (i != cmdInfo.cmdList.size() - 1) {
+            cmd += " ";
+        }
+    }
+
+    bool isUserPipeInput = false;
+    int userPipeIndex = -1;
+    for (int i = 0; i < process->args.size(); i++) {
+        if (process->args[i][0] == '<') {
+            int sourceId = stoi(process->args[i].substr(1));
+            if (!userList[sourceId].isLogin) { // the source user does not exist
+                process->from = fd_null; // read from /dev/null
+                string msg = "*** Error: user #" + to_string(sourceId) + " does not exist yet. ***\n";
+                write(user->fd, msg.c_str(), msg.size());
+            }
+            else {
+                bool isUserPipeExist = false;
+                for (int upIdx = 0; upIdx < userPipeList.size(); upIdx++) {
+                    if (userPipeList[upIdx].toId == user->id && userPipeList[upIdx].fromId == sourceId) { // user pipe exists
+                        process->from = userPipeList[upIdx].userPipefd; // read from user pipe
+                        string msg = "*** " + userList[user->id].name + " (#" + to_string(user->id) + ") just received from " + userList[sourceId].name + " (#" + to_string(sourceId) + ") by '" + cmd + "' ***\n";
+                        broadcastMessage(msg);
+                        isUserPipeExist = true;
+                        isUserPipeInput = true;
+                        userPipeIndex = upIdx;
+                        break;
+                    }
+                }
+                if (!isUserPipeExist) { // user pipe does not exist
+                    process->from = fd_null; // read from /dev/null
+                    string msg = "*** Error: the pipe #" + to_string(sourceId) + "->#" + to_string(user->id) + " does not exist yet. ***\n";
+                    write(user->fd, msg.c_str(), msg.size());
+                }
+            }
+        }
+        else if (process->args[i][0] == '>') {
+            if (i != process->args.size() - 1) {
+                // handle the case (e.g. cat >1 <2)
+                if (process->args[i + 1][0] == '<' && process->args[i + 1].size() > 1) {
+                    int sourceId = stoi(process->args[i + 1].substr(1));
+                    if (!userList[sourceId].isLogin) { // the target user does not exist
+                        process->from = fd_null; // read from /dev/null
+                        string msg = "*** Error: user #" + to_string(sourceId) + " does not exist yet. ***\n";
+                        write(user->fd, msg.c_str(), msg.size());
+                    }
+                    else {
+                        bool isUserPipeExist = false;
+                        for (int upIdx = 0; upIdx < userPipeList.size(); upIdx++) {
+                            if (userPipeList[upIdx].toId == sourceId && userPipeList[upIdx].fromId == user->id) { // user pipe exists
+                                process->from = userPipeList[upIdx].userPipefd; // read from user pipe
+                                string msg = "*** " + userList[user->id].name + " (#" + to_string(user->id) + ") just received from " + userList[sourceId].name + " (#" + to_string(sourceId) + ") by '" + cmd + "' ***\n";
+                                broadcastMessage(msg);
+                                isUserPipeExist = true;
+                                isUserPipeInput = true;
+                                userPipeIndex = upIdx;
+                                break;
+                            }
+                        }
+                        if (!isUserPipeExist) { // user pipe does not exist
+                            process->from = fd_null; // read from /dev/null
+                            string msg = "*** Error: the pipe #" + to_string(user->id) + "->#" + to_string(sourceId) + " does not exist yet. ***\n";
+                            write(user->fd, msg.c_str(), msg.size());
+                        }
+                    }
+                }
+            }
+            int targetId = stoi(process->args[i].substr(1));
+            if (!userList[targetId].isLogin) { // the target user does not exist
+                process->to = fd_null; // write to /dev/null
+                string msg = "*** Error: user #" + to_string(targetId) + " does not exist yet. ***\n";
+                write(user->fd, msg.c_str(), msg.size());
+            }
+            else {
+                bool isUserPipeExist = false;
+                for (int i = 0; i < userPipeList.size(); i++) {
+                    if (userPipeList[i].fromId == user->id && userPipeList[i].toId == targetId) { // user pipe exists
+                        process->to = fd_null; // write to /dev/null
+                        string msg = "*** Error: the pipe #" + to_string(user->id) + "->#" + to_string(targetId) + " already exists. ***\n";
+                        write(user->fd, msg.c_str(), msg.size());
+                        isUserPipeExist = true;
+                        break;
+                    }
+                }
+                if (!isUserPipeExist) { // user pipe does not exist, create a new user pipe
+                    UserPipe userPipe;
+                    userPipe.fromId = user->id;
+                    userPipe.toId = targetId;
+                    pipe(userPipe.userPipefd);
+                    userPipeList.push_back(userPipe);
+                    process->to = userPipeList[userPipeList.size() - 1].userPipefd;
+
+                    string msg = "*** " + userList[user->id].name + " (#" + to_string(user->id) + ") just piped '" + cmd + "' to " + userList[targetId].name + " (#" + to_string(targetId) + ") ***\n";
+                    broadcastMessage(msg);
+                }
+            }
+        }
+    }
+
+    return {isUserPipeInput, userPipeIndex};
 }
 
 // Use number pipe to classify cmd
@@ -238,7 +353,10 @@ bool built_in_command(UserInfo* user, const CommandInfo& cmdInfo) {
 void execute(const Process& process) {
     char* argv[process.args.size() + 1];
     for (int i = 0; i < process.args.size(); i++) {
-        if (process.args[i] == "<") { // Implement "<" -- for demo
+        if ((process.args[i][0] == '>' || process.args[i][0] == '<') && process.args[i].size() > 1) { // user pipe
+            argv[i] = NULL;
+        }
+        else if (process.args[i] == "<") { // Implement "<" -- for demo
             int fd = open(process.args[i + 1].c_str(), O_RDONLY);
             dup2(fd, STDIN_FILENO);
             close(fd);
@@ -263,18 +381,19 @@ void execute(const Process& process) {
 }
 
 // Find if there is a number pipe to pass to this command
-int findPipeCmdId(UserInfo* user, const vector<CommandInfo>& commands, int i) {
-    for (int np = 0; np < user->numPipeList.size(); np++) {
-        if (user->numPipeList[np].pipeCmdId == commands[i].cmdId) {
+int findPipeCmdId(const UserInfo& user, const vector<CommandInfo>& commands, int i) {
+    for (int np = 0; np < user.numPipeList.size(); np++) {
+        if (user.numPipeList[np].pipeCmdId == commands[i].cmdId) {
             return np;
         }
     }
     return -1;
 }
 
-void executeProcess(UserInfo* user, vector<Process>& processList, int cmdId, bool isNumPipeInput, int numPipeIndex) {
+void executeProcess(UserInfo* user, vector<Process>& processList, const CommandInfo& cmdInfo, bool isNumPipeInput, int numPipeIndex) {
     pid_t pid;
     int pipefd[2][2]; // pipefd[0] for odd process, pipefd[1] for even process
+    int cmdId = cmdInfo.cmdId;
     for (int j = 0; j < processList.size(); j++) { // for each process
         if (processList[j].isNumberedPipe || processList[j].isErrPipe) { // create numbered pipe
             int numPipeCmdId = cmdId + processList[j].pipeNumber;
@@ -307,6 +426,15 @@ void executeProcess(UserInfo* user, vector<Process>& processList, int cmdId, boo
             pipe(pipefd[j % 2]);
         }
 
+        bool isUserPipeInput = false;
+        int userPipeIndex = -1;
+        for (int i = 0; i < processList[j].args.size(); i++) {
+            if ((processList[j].args[i][0] == '>' || processList[j].args[i][0] == '<') && processList[j].args[i].size() > 1) { // user pipe
+                tie(isUserPipeInput, userPipeIndex) = userPipeMessage(user, cmdInfo, &processList[j]);
+                break;
+            }
+        }
+
         while ((pid = fork()) == -1) { // if fork() failed, wait for any one child process to finish
             waitpid(-1, NULL, 0);
         }
@@ -320,7 +448,7 @@ void executeProcess(UserInfo* user, vector<Process>& processList, int cmdId, boo
                     dup2(process.to[1], STDERR_FILENO);
                 }
                 close(process.to[1]);
-            } else { // if the process is the last one
+            } else { // redirect stdout and stderr to user's fd
                 dup2(STDOUT_FILENO, user->fd);
                 dup2(STDERR_FILENO, user->fd);
             }
@@ -337,6 +465,11 @@ void executeProcess(UserInfo* user, vector<Process>& processList, int cmdId, boo
             if (j == 0 && isNumPipeInput) { // close number pipe
                 close(user->numPipeList[numPipeIndex].numPipefd[0]);
                 close(user->numPipeList[numPipeIndex].numPipefd[1]);
+            }
+            if (j == 0 && isUserPipeInput) { // close user pipe
+                close(userPipeList[userPipeIndex].userPipefd[0]);
+                close(userPipeList[userPipeIndex].userPipefd[1]);
+                userPipeList.erase(userPipeList.begin() + userPipeIndex);
             }
             if (j > 0) { // close pipe
                 close(pipefd[(j - 1) % 2][0]);
@@ -362,12 +495,12 @@ void executeCommand(UserInfo* user, const vector<CommandInfo>& commands) {
         vector<Process> processList = parseCommand(commands[i]);
 
         bool isNumPipeInput = false;
-        int numPipeIndex = findPipeCmdId(user, commands, i);
+        int numPipeIndex = findPipeCmdId(*user, commands, i);
         if (numPipeIndex != -1) {
             isNumPipeInput = true;
         }
 
-        executeProcess(user, processList, commands[i].cmdId, isNumPipeInput, numPipeIndex);
+        executeProcess(user, processList, commands[i], isNumPipeInput, numPipeIndex);
     }
 }
 
@@ -509,9 +642,13 @@ void userLogin(int msock, fd_set& afds) {
 }
 
 int main(int argc, char *argv[]) {
+    // initial /dev/null
+    fd_null[0] = open("/dev/null", O_RDWR);
+    fd_null[1] = open("/dev/null", O_RDWR);
+
     // Create a passive TCP socket and get its file descriptor (msock)
-    int msock = passiveTCP(atoi(argv[1]));
-    // int msock = passiveTCP(7000); // for testing
+    // int msock = passiveTCP(atoi(argv[1]));
+    int msock = passiveTCP(7000); // for testing
 
     // Set up the file descriptor set for select
     // int nfds = getdtablesize(); // get the maximum number of file descriptors (根據系統而定)
