@@ -134,32 +134,23 @@ void userPipeOutMessage(int targetId, UserInfo* user, const string& cmd, Process
 }
 
 // Function to handle user pipe message
-int userPipeMessage(UserInfo* user, const CommandInfo& cmdInfo, Process* process) {
-    // combine the split command
-    string cmd = "";
-    for (int i = 0; i < cmdInfo.cmdList.size(); i++) {
-        cmd += cmdInfo.cmdList[i];
-        if (i != cmdInfo.cmdList.size() - 1) {
-            cmd += " ";
-        }
-    }
-
+int userPipeMessage(UserInfo* user, const string& input, Process* process) {
     int userPipeIndex = -1;
     for (int i = 0; i < process->args.size(); i++) {
         if (process->args[i][0] == '<') {
             int sourceId = stoi(process->args[i].substr(1));
-            userPipeIndex = userPipeInMessage(sourceId, user, cmd, process);
+            userPipeIndex = userPipeInMessage(sourceId, user, input, process);
         }
         else if (process->args[i][0] == '>') {
             if (i != process->args.size() - 1) {
                 // handle the case (e.g. cat >1 <2)
                 if (process->args[i + 1][0] == '<' && process->args[i + 1].size() > 1) {
                     int sourceId = stoi(process->args[i + 1].substr(1));
-                    userPipeIndex = userPipeInMessage(sourceId, user, cmd, process);
+                    userPipeIndex = userPipeInMessage(sourceId, user, input, process);
                 }
             }
             int targetId = stoi(process->args[i].substr(1));
-            userPipeOutMessage(targetId, user, cmd, process);
+            userPipeOutMessage(targetId, user, input, process);
             break;
         }
     }
@@ -375,10 +366,9 @@ int findPipeCmdId(const UserInfo& user, const vector<CommandInfo>& commands, int
     return -1;
 }
 
-void executeProcess(UserInfo* user, vector<Process>& processList, const CommandInfo& cmdInfo, bool isNumPipeInput, int numPipeIndex) {
+void executeProcess(UserInfo* user, vector<Process>& processList, const string& input, int cmdId, bool isNumPipeInput, int numPipeIndex) {
     pid_t pid;
     int pipefd[2][2]; // pipefd[0] for odd process, pipefd[1] for even process
-    int cmdId = cmdInfo.cmdId;
     for (int j = 0; j < processList.size(); j++) { // for each process
         if (processList[j].isNumberedPipe || processList[j].isErrPipe) { // create numbered pipe
             int numPipeCmdId = cmdId + processList[j].pipeNumber;
@@ -414,7 +404,7 @@ void executeProcess(UserInfo* user, vector<Process>& processList, const CommandI
         int userPipeIndex = -1;
         for (int i = 0; i < processList[j].args.size(); i++) {
             if ((processList[j].args[i][0] == '>' || processList[j].args[i][0] == '<') && processList[j].args[i].size() > 1) { // user pipe
-                userPipeIndex = userPipeMessage(user, cmdInfo, &processList[j]);
+                userPipeIndex = userPipeMessage(user, input, &processList[j]);
                 break;
             }
         }
@@ -470,7 +460,7 @@ void executeProcess(UserInfo* user, vector<Process>& processList, const CommandI
 }
 
 // Function to execute each command
-void executeCommand(UserInfo* user, const vector<CommandInfo>& commands) {
+void executeCommand(UserInfo* user, const vector<CommandInfo>& commands, const string& input) {
     for (int i = 0; i < commands.size(); i++) { // for each command
         if (built_in_command(user, commands[i])) {
             continue;
@@ -484,7 +474,7 @@ void executeCommand(UserInfo* user, const vector<CommandInfo>& commands) {
             isNumPipeInput = true;
         }
 
-        executeProcess(user, processList, commands[i], isNumPipeInput, numPipeIndex);
+        executeProcess(user, processList, input, commands[i].cmdId, isNumPipeInput, numPipeIndex);
     }
 }
 
@@ -505,6 +495,7 @@ int shell(int fd) {
     }
 
     string input(buf);
+    input.erase(input.find_last_not_of(" \n\r\t") + 1); // remove trailing whitespace
     vector<CommandInfo> commands;
 
     // Redirect stdout, stderr
@@ -533,7 +524,7 @@ int shell(int fd) {
         return -1;
     }
 
-    executeCommand(user, commands);
+    executeCommand(user, commands, input);
 
     // Print the command line prompt
     write(fd, PROMPT, strlen(PROMPT)); // %
@@ -634,8 +625,8 @@ int main(int argc, char *argv[]) {
     fd_null[1] = open("/dev/null", O_RDWR);
 
     // Create a passive TCP socket and get its file descriptor (msock)
-    int msock = passiveTCP(atoi(argv[1]));
-    // int msock = passiveTCP(7000); // for testing
+    // int msock = passiveTCP(atoi(argv[1]));
+    int msock = passiveTCP(7000); // for testing
 
     // Set up the file descriptor set for select
     // int nfds = getdtablesize(); // get the maximum number of file descriptors (根據系統而定)
