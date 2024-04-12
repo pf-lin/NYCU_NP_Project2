@@ -515,7 +515,11 @@ int getUserIndex(int fd) {
 int shell(int fd) {
     char buf[MAXBUFSIZE];
     memset(buf, 0, sizeof(buf));
-    if (read(fd, buf, sizeof(buf)) < 0) {
+    int n = read(fd, buf, sizeof(buf));
+    if (n == 0) { // client disconnected
+        return -1;
+    }
+    else if (n < 0) { // read error
         cerr << "Error: failed to read from client" << endl;
     }
 
@@ -679,6 +683,7 @@ int main(int argc, char *argv[]) {
         // Wait for activity on any of the sockets
         if (select(nfds, &rfds, NULL, NULL, NULL) < 0) { // 直到有訊息進來才會繼續 (system call)
             cerr << "Error in select" << endl;
+            continue; // may be interrupted by signal or other errors -> select again
         }
 
         // Check if there is a new incoming connection
