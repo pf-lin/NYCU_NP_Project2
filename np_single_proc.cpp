@@ -608,6 +608,16 @@ void initUserInfos(int idx) {
     userList[idx].numPipeList.clear();
 }
 
+void deleteUserPipe(int id) {
+    for (int i = 0; i < userPipeList.size(); i++) {
+        if (userPipeList[i].fromId == id || userPipeList[i].toId == id) {
+            close(userPipeList[i].userPipefd[0]);
+            close(userPipeList[i].userPipefd[1]);
+            userPipeList.erase(userPipeList.begin() + i);
+        }
+    }
+}
+
 void userLogin(int msock, fd_set& afds) {
     // Accept the new connection
     struct sockaddr_in clientAddr;
@@ -643,6 +653,17 @@ void userLogin(int msock, fd_set& afds) {
 
     // Print the command line prompt
     write(ssock, PROMPT, strlen(PROMPT)); // %
+}
+
+void userLogout(int fd) {
+    // Find the user index
+    int userIndex = getUserIndex(fd);
+    if (userIndex != -1) {
+        string msg = "*** User '" + userList[userIndex].name + "' left. ***\n";
+        broadcastMessage(msg);
+        initUserInfos(userIndex);
+        deleteUserPipe(userIndex);
+    }
 }
 
 int main(int argc, char *argv[]) {
@@ -698,13 +719,7 @@ int main(int argc, char *argv[]) {
                 // run shell
                 int status = shell(fd);
                 if (status == -1) { // exit
-                    // Find the user index
-                    int userIndex = getUserIndex(fd);
-                    if (userIndex != -1) {
-                        string msg = "*** User '" + userList[userIndex].name + "' left. ***\n";
-                        broadcastMessage(msg);
-                        initUserInfos(userIndex);
-                    }
+                    userLogout(fd);
                     close(fd);
                     FD_CLR(fd, &afds);
                 }
