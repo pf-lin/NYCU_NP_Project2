@@ -291,9 +291,6 @@ int shell() {
         getline(cin, input);
 
         commands = splitCommand(input);
-        if (commands.back().cmdList[0] == "exit") {
-            return 0;
-        }
         executeCommand(commands);
     }
 
@@ -338,32 +335,37 @@ int main(int argc, char *argv[]) {
         cerr << "Error: server can't listen on socket" << endl;
     }
 
+    // Store stdin, stdout, stderr
     int storeStd[3];
-    while (true) {
-        // Store stdin, stdout, stderr
-        storeStd[0] = dup(STDIN_FILENO);
-        storeStd[1] = dup(STDOUT_FILENO);
-        storeStd[2] = dup(STDERR_FILENO);
+    storeStd[0] = dup(STDIN_FILENO);
+    storeStd[1] = dup(STDOUT_FILENO);
+    storeStd[2] = dup(STDERR_FILENO);
 
+    while (true) {
         // Accept call creates a new socket for the incoming connection
         newSocketfd = accept(serverSocketfd, (struct sockaddr*)&clientAddr, &addr_size);
         if (newSocketfd < 0) {
             cerr << "Error: server can't accept client connection" << endl;
         }
 
-        // Redirect stdin, stdout, stderr to the new socket
-        dup2(newSocketfd, STDIN_FILENO);
-        dup2(newSocketfd, STDOUT_FILENO);
-        dup2(newSocketfd, STDERR_FILENO);
-
-        shell();
-
-        // Restore stdin, stdout, stderr
-        dup2(storeStd[0], STDIN_FILENO);
-        dup2(storeStd[1], STDOUT_FILENO);
-        dup2(storeStd[2], STDERR_FILENO);
-
-        close(newSocketfd);
+        // Fork a child process to handle the new connection (Concurrent connection-oriented server)
+        pid_t pid = fork();
+        if (pid == 0) { // child process
+            // Redirect stdin, stdout, stderr to the new socket
+            dup2(newSocketfd, STDIN_FILENO);
+            dup2(newSocketfd, STDOUT_FILENO);
+            dup2(newSocketfd, STDERR_FILENO);
+            close(newSocketfd);
+            close(serverSocketfd);
+            shell();
+        }
+        else if (pid > 0) { // parent process
+            // Restore stdin, stdout, stderr
+            dup2(storeStd[0], STDIN_FILENO);
+            dup2(storeStd[1], STDOUT_FILENO);
+            dup2(storeStd[2], STDERR_FILENO);
+            close(newSocketfd);
+        }
     }
 
     return 0;
