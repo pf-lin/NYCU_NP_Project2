@@ -476,12 +476,14 @@ void executeProcess(UserInfo* user, vector<Process>& processList, const string& 
             }
         }
     }
-    if (!processList.back().isNumberedPipe) { // if the last process is not a numbered pipe, wait for it to finish
-        waitpid(pid, NULL, 0);
-    }
-    else {
+
+    // if the last process is number pipe or user pipe -> shouldn't wait
+    if (processList.back().isNumberedPipe || processList.back().userPipeToIndex != -1) {
         usleep(50000);
+        return;
     }
+    // wait for the last process to finish
+    waitpid(pid, NULL, 0);
 }
 
 // Function to execute each command
