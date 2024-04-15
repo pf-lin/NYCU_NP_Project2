@@ -83,6 +83,7 @@ const string welcomeMessage = "****************************************\n"
 void signalTerminate(int signo) {
     shmctl(SHMKEY_USERINFO, IPC_RMID, 0);
     shmctl(SHMKEY_MESSAGE, IPC_RMID, 0);
+    exit(0);
 }
 
 void signalBroadcast(int signo) {
