@@ -335,12 +335,6 @@ int main(int argc, char *argv[]) {
         cerr << "Error: server can't listen on socket" << endl;
     }
 
-    // Store stdin, stdout, stderr
-    int storeStd[3];
-    storeStd[0] = dup(STDIN_FILENO);
-    storeStd[1] = dup(STDOUT_FILENO);
-    storeStd[2] = dup(STDERR_FILENO);
-
     while (true) {
         // Accept call creates a new socket for the incoming connection
         newSocketfd = accept(serverSocketfd, (struct sockaddr*)&clientAddr, &addr_size);
@@ -360,10 +354,6 @@ int main(int argc, char *argv[]) {
             shell();
         }
         else if (pid > 0) { // parent process
-            // Restore stdin, stdout, stderr
-            dup2(storeStd[0], STDIN_FILENO);
-            dup2(storeStd[1], STDOUT_FILENO);
-            dup2(storeStd[2], STDERR_FILENO);
             close(newSocketfd);
         }
     }
