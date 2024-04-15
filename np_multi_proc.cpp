@@ -58,7 +58,6 @@ struct UserInfo {
     int id; // range from 1 to 30
     char name[25];
     char ipPort[25];
-    int fd;
     pid_t pid;
 };
 
@@ -81,6 +80,15 @@ const string welcomeMessage = "****************************************\n"
                               "** Welcome to the information server. **\n"
                               "****************************************\n";
 
+void signalTerminate(int signo) {
+    shmctl(SHMKEY_USERINFO, IPC_RMID, 0);
+    shmctl(SHMKEY_MESSAGE, IPC_RMID, 0);
+}
+
+void signalBroadcast(int signo) {
+    cout << shm_broadcast->msg << flush;
+}
+
 // Function to broadcast message to all users
 void broadcastMessage(const string& msg) {
     memset(shm_broadcast->msg, 0, MAXBUFSIZE);
@@ -89,6 +97,68 @@ void broadcastMessage(const string& msg) {
         if (userList[idx].isLogin) {
             kill(userList[idx].pid, SIGUSR1);
         }
+    }
+}
+
+void initUserInfos(int idx) {
+    userList[idx].isLogin = false;
+    userList[idx].id = 0;
+    strcpy(userList[idx].name, "(no name)");
+    strcpy(userList[idx].ipPort, "");
+    userList[idx].pid = -1;
+}
+
+void deleteUserPipe(int id) {
+    for (int i = 0; i < userPipeList.size(); i++) {
+        if (userPipeList[i].fromId == id || userPipeList[i].toId == id) {
+            close(userPipeList[i].userPipefd[0]);
+            close(userPipeList[i].userPipefd[1]);
+            userPipeList.erase(userPipeList.begin() + i);
+        }
+    }
+}
+
+void userLoginMessage(int idx) {
+    cout << welcomeMessage;
+    string msg = "*** User '" + string(userList[idx].name) + "' entered from " + userList[idx].ipPort + ". ***\n";
+    broadcastMessage(msg);
+    cout << PROMPT;
+}
+
+tuple<int, int> userLogin(int msock) {
+    // Accept the new connection
+    struct sockaddr_in clientAddr;
+    socklen_t clientAddrLen = sizeof(clientAddr);
+    int ssock = accept(msock, (struct sockaddr*)&clientAddr, &clientAddrLen);
+    if (ssock < 0) {
+        cerr << "Failed to accept the new connection" << endl;
+    }
+
+    // Get the client IP address and port
+    char ipBuf[INET_ADDRSTRLEN];
+    string clientIP = inet_ntop(AF_INET, &clientAddr.sin_addr, ipBuf, sizeof(clientIP));
+    string clientPort = to_string(ntohs(clientAddr.sin_port));
+    string ipPort = clientIP + ":" + clientPort;
+
+    // Find the first available user slot
+    for (int idx = 1; idx <= MAXUSER; idx++) {
+        if (!userList[idx].isLogin) {
+            userList[idx].isLogin = true;
+            userList[idx].id = idx;
+            strcpy(userList[idx].ipPort, ipPort.c_str());
+            return {ssock, userList[idx].id};
+        }
+    }
+}
+
+void userLogout(int userIndex) {
+    if (userIndex != -1) {
+        string msg = "*** User '" + string(userList[userIndex].name) + "' left. ***\n";
+        broadcastMessage(msg);
+        initUserInfos(userIndex);
+        deleteUserPipe(userIndex);
+        shmdt(userList);
+        shmdt(shm_broadcast);
     }
 }
 
@@ -269,6 +339,7 @@ bool built_in_command(UserInfo* user, const CommandInfo& cmdInfo) {
         }
     }
     else if (cmdInfo.cmdList[0] == "exit") {
+        userLogout(user->id);
         exit(0);
     }
     else if (cmdInfo.cmdList[0] == "who") {
@@ -297,6 +368,8 @@ bool built_in_command(UserInfo* user, const CommandInfo& cmdInfo) {
                 }
             }
             msg += "\n";
+            memset(shm_broadcast->msg, 0, MAXBUFSIZE);
+            strcpy(shm_broadcast->msg, msg.c_str());
             kill(userList[targetId].pid, SIGUSR1);
         }
     }
@@ -507,19 +580,9 @@ void executeCommand(UserInfo* user, const vector<CommandInfo>& commands, const s
     }
 }
 
-int getUserIndex(int fd) {
-    for (int idx = 1; idx <= MAXUSER; idx++) {
-        if (userList[idx].fd == fd) {
-            return idx;
-        }
-    }
-    return -1;
-}
-
-int shell(int fd) {
+int shell(int idx) {
     // Get the current user
-    int userIndex = getUserIndex(fd);
-    UserInfo* user = &userList[userIndex];
+    UserInfo* user = &userList[idx];
 
     // Clear the environment variables
     clearenv();
@@ -579,72 +642,6 @@ int passiveTCP(int port) {
     return serverSocketfd;
 }
 
-void initUserInfos(int idx) {
-    userList[idx].isLogin = false;
-    userList[idx].id = 0;
-    strcpy(userList[idx].name, "(no name)");
-    strcpy(userList[idx].ipPort, "");
-    userList[idx].fd = -1;
-}
-
-void deleteUserPipe(int id) {
-    for (int i = 0; i < userPipeList.size(); i++) {
-        if (userPipeList[i].fromId == id || userPipeList[i].toId == id) {
-            close(userPipeList[i].userPipefd[0]);
-            close(userPipeList[i].userPipefd[1]);
-            userPipeList.erase(userPipeList.begin() + i);
-        }
-    }
-}
-
-void userLoginMessage(int fd) {
-    int idx = getUserIndex(fd);
-    cout << welcomeMessage;
-    string msg = "*** User '" + string(userList[idx].name) + "' entered from " + userList[idx].ipPort + ". ***\n";
-    broadcastMessage(msg);
-    cout << PROMPT;
-}
-
-int userLogin(int msock) {
-    // Accept the new connection
-    struct sockaddr_in clientAddr;
-    socklen_t clientAddrLen = sizeof(clientAddr);
-    int ssock = accept(msock, (struct sockaddr*)&clientAddr, &clientAddrLen);
-    if (ssock < 0) {
-        cerr << "Failed to accept the new connection" << endl;
-    }
-
-    // Get the client IP address and port
-    char ipBuf[INET_ADDRSTRLEN];
-    string clientIP = inet_ntop(AF_INET, &clientAddr.sin_addr, ipBuf, sizeof(clientIP));
-    string clientPort = to_string(ntohs(clientAddr.sin_port));
-    string ipPort = clientIP + ":" + clientPort;
-
-    // Find the first available user slot
-    for (int idx = 1; idx <= MAXUSER; idx++) {
-        if (!userList[idx].isLogin) {
-            userList[idx].isLogin = true;
-            userList[idx].id = idx;
-            strcpy(userList[idx].ipPort, ipPort.c_str());
-            userList[idx].fd = ssock;
-            break;
-        }
-    }
-
-    return ssock;
-}
-
-void userLogout(int fd) {
-    // Find the user index
-    int userIndex = getUserIndex(fd);
-    if (userIndex != -1) {
-        string msg = "*** User '" + string(userList[userIndex].name) + "' left. ***\n";
-        broadcastMessage(msg);
-        initUserInfos(userIndex);
-        deleteUserPipe(userIndex);
-    }
-}
-
 void createSharedMemory() {
     // Create shared memory for user information
     int shmid_userInfo = shmget(SHMKEY_USERINFO, sizeof(UserInfo) * (MAXUSER + 1), PERMS | IPC_CREAT);
@@ -675,6 +672,9 @@ int main(int argc, char *argv[]) {
     fd_null[0] = open("/dev/null", O_RDWR);
     fd_null[1] = open("/dev/null", O_RDWR);
 
+    signal(SIGINT, signalTerminate);
+    signal(SIGUSR1, signalBroadcast);
+
     // Create a passive TCP socket and get its file descriptor (msock)
     int msock = passiveTCP(atoi(argv[1]));
     // int msock = passiveTCP(7000); // for testing
@@ -687,7 +687,7 @@ int main(int argc, char *argv[]) {
     }
 
     while (true) {
-        int ssock = userLogin(msock);
+        auto [ssock, userIndex] = userLogin(msock);
 
         // Fork a child process to handle the new connection (Concurrent connection-oriented server)
         pid_t pid;
@@ -702,10 +702,11 @@ int main(int argc, char *argv[]) {
             dup2(ssock, STDOUT_FILENO);
             dup2(ssock, STDERR_FILENO);
             close(ssock);
-            userLoginMessage(ssock);
-            shell(ssock);
+            userLoginMessage(userIndex);
+            shell(userIndex);
         }
         else if (pid > 0) { // parent process
+            userList[userIndex].pid = pid;
             close(ssock);
         }
     }
