@@ -59,15 +59,16 @@ struct UserInfo {
     char name[25];
     char ipPort[25];
     int fd;
+    pid_t pid;
 };
 
-struct BroadcastMessage {
+struct BroadcastMsg {
     char msg[MAXBUFSIZE];
 };
 
 // share memory
 UserInfo *userList;
-BroadcastMessage *shm_message;
+BroadcastMsg *shm_broadcast;
 
 // FIFO
 vector<UserPipe> userPipeList; // store user pipe
@@ -82,9 +83,11 @@ const string welcomeMessage = "****************************************\n"
 
 // Function to broadcast message to all users
 void broadcastMessage(const string& msg) {
+    memset(shm_broadcast->msg, 0, MAXBUFSIZE);
+    strcpy(shm_broadcast->msg, msg.c_str());
     for (int idx = 1; idx <= MAXUSER; idx++) {
         if (userList[idx].isLogin) {
-            write(userList[idx].fd, msg.c_str(), msg.size());
+            kill(userList[idx].pid, SIGUSR1);
         }
     }
 }
@@ -92,8 +95,7 @@ void broadcastMessage(const string& msg) {
 void userPipeInMessage(int sourceId, UserInfo* user, const string& cmd, Process* process) {
     if (sourceId < 0 || sourceId > 30 || !userList[sourceId].isLogin) { // the source user does not exist
         process->isUserPipeFromErr = true;
-        string msg = "*** Error: user #" + to_string(sourceId) + " does not exist yet. ***\n";
-        write(user->fd, msg.c_str(), msg.size());
+        cout << "*** Error: user #" << sourceId << " does not exist yet. ***\n";
     }
     else {
         bool isUserPipeExist = false;
@@ -108,8 +110,7 @@ void userPipeInMessage(int sourceId, UserInfo* user, const string& cmd, Process*
         }
         if (!isUserPipeExist) { // user pipe does not exist
             process->isUserPipeFromErr = true;
-            string msg = "*** Error: the pipe #" + to_string(sourceId) + "->#" + to_string(user->id) + " does not exist yet. ***\n";
-            write(user->fd, msg.c_str(), msg.size());
+            cout << "*** Error: the pipe #" << sourceId << "->#" << user->id << " does not exist yet. ***\n";
         }
     }
 }
@@ -117,16 +118,14 @@ void userPipeInMessage(int sourceId, UserInfo* user, const string& cmd, Process*
 void userPipeOutMessage(int targetId, UserInfo* user, const string& cmd, Process* process) {
     if (targetId < 0 || targetId > 30 || !userList[targetId].isLogin) { // the target user does not exist
         process->isUserPipeToErr = true;
-        string msg = "*** Error: user #" + to_string(targetId) + " does not exist yet. ***\n";
-        write(user->fd, msg.c_str(), msg.size());
+        cout << "*** Error: user #" << targetId << " does not exist yet. ***\n";
     }
     else {
         bool isUserPipeExist = false;
         for (int i = 0; i < userPipeList.size(); i++) {
             if (userPipeList[i].fromId == user->id && userPipeList[i].toId == targetId) { // user pipe exists
                 process->isUserPipeToErr = true;
-                string msg = "*** Error: the pipe #" + to_string(user->id) + "->#" + to_string(targetId) + " already exists. ***\n";
-                write(user->fd, msg.c_str(), msg.size());
+                cout << "*** Error: the pipe #" << user->id << "->#" + to_string(targetId) << " already exists. ***\n";
                 isUserPipeExist = true;
                 break;
             }
@@ -266,32 +265,29 @@ bool built_in_command(UserInfo* user, const CommandInfo& cmdInfo) {
         }
         const char* env = getenv(cmdInfo.cmdList[1].c_str());
         if (env != NULL) {
-            string msg = env + string("\n");
-            write(user->fd, msg.c_str(), msg.size());
+            cout << env << endl;
         }
     }
     else if (cmdInfo.cmdList[0] == "exit") {
         exit(0);
     }
     else if (cmdInfo.cmdList[0] == "who") {
-        string msg = "<ID>\t<nickname>\t<IP:port>\t<indicate me>\n";
+        cout << "<ID>\t<nickname>\t<IP:port>\t<indicate me>\n";
         for (int idx = 1; idx <= MAXUSER; idx++) {
             if (userList[idx].isLogin) {
-                msg += to_string(userList[idx].id) + "\t" + userList[idx].name + "\t" + userList[idx].ipPort;
+                cout << userList[idx].id << "\t" << userList[idx].name << "\t" << userList[idx].ipPort;
                 if (idx == user->id) {
-                    msg += "\t<-me";
+                    cout << "\t<-me";
                 }
-                msg += "\n";
+                cout << "\n";
             }
         }
-        write(user->fd, msg.c_str(), msg.size());
     }
     else if (cmdInfo.cmdList[0] == "tell") {
         int targetId = stoi(cmdInfo.cmdList[1]);
         string msg = "";
         if (!userList[targetId].isLogin) { // the target user does not exist
-            msg += "*** Error: user #" + to_string(targetId) + " does not exist yet. ***\n";
-            write(user->fd, msg.c_str(), msg.size());
+            cout << "*** Error: user #" << targetId << " does not exist yet. ***\n";
         } else { // send message to target user
             msg += "*** " + string(user->name) + " told you ***: ";
             for (int i = 2; i < cmdInfo.cmdList.size(); i++) {
@@ -301,7 +297,7 @@ bool built_in_command(UserInfo* user, const CommandInfo& cmdInfo) {
                 }
             }
             msg += "\n";
-            write(userList[targetId].fd, msg.c_str(), msg.size());
+            kill(userList[targetId].pid, SIGUSR1);
         }
     }
     else if (cmdInfo.cmdList[0] == "yell") {
@@ -456,9 +452,6 @@ void executeProcess(UserInfo* user, vector<Process>& processList, const string& 
                     dup2(process.to[1], STDERR_FILENO);
                 }
                 close(process.to[1]);
-            } else { // redirect stdout and stderr to user's fd
-                dup2(STDOUT_FILENO, user->fd);
-                dup2(STDERR_FILENO, user->fd);
             }
             if (process.from != nullptr) {
                 close(process.from[1]);
@@ -545,7 +538,7 @@ int shell(int fd) {
         executeCommand(user, commands, input);
 
         // Print the command line prompt
-        write(fd, PROMPT, strlen(PROMPT)); // %
+        cout << PROMPT; // %
     }
 
     return 0;
@@ -664,12 +657,12 @@ void createSharedMemory() {
     }
 
     // Create shared memory for broadcast message
-    int shmid_message = shmget(SHMKEY_MESSAGE, sizeof(BroadcastMessage), PERMS | IPC_CREAT);
+    int shmid_message = shmget(SHMKEY_MESSAGE, sizeof(BroadcastMsg), PERMS | IPC_CREAT);
     if (shmid_message < 0) {
         cerr << "Error: failed to create shared memory for broadcast message" << endl;
     }
-    shm_message = (BroadcastMessage*)shmat(shmid_message, 0, 0);
-    if (shm_message == (BroadcastMessage*)-1) {
+    shm_broadcast = (BroadcastMsg*)shmat(shmid_message, 0, 0);
+    if (shm_broadcast == (BroadcastMsg*)-1) {
         cerr << "Error: failed to attach shared memory for broadcast message" << endl;
     }
 }
