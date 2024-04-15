@@ -1,16 +1,16 @@
-#include <iostream>
-#include <string>
+#include <arpa/inet.h> // add
 #include <cstring>
+#include <fcntl.h>
+#include <iostream>
+#include <netinet/in.h> // add
 #include <sstream>
-#include <vector>
-#include <unistd.h>
 #include <stdlib.h>
+#include <string>
+#include <sys/socket.h> // add
 #include <sys/types.h>
 #include <sys/wait.h>
-#include <fcntl.h>
-#include <sys/socket.h> // add
-#include <netinet/in.h> // add
-#include <arpa/inet.h> // add
+#include <unistd.h>
+#include <vector>
 
 using namespace std;
 
@@ -34,11 +34,11 @@ struct Process {
     int *from = nullptr;
 };
 
-int cmdCount = 0; // count the number of commands
+int cmdCount = 0;                      // count the number of commands
 vector<NumberedPipe> numPipeList = {}; // store numbered pipe
 
 // Use number pipe to classify cmd
-vector<CommandInfo> splitCommand(const string& command) {
+vector<CommandInfo> splitCommand(const string &command) {
     // Split the command by ' ' (space)
     vector<string> cmdSplitList;
     string token;
@@ -77,7 +77,7 @@ vector<CommandInfo> splitCommand(const string& command) {
 }
 
 // Parse command into each process (fork and execvp)
-vector<Process> parseCommand(const CommandInfo& cmdInfo) {
+vector<Process> parseCommand(const CommandInfo &cmdInfo) {
     vector<Process> processList;
     int cmdListIndex = 0;
     for (int i = 0; i < cmdInfo.cmdList.size(); i++) {
@@ -118,7 +118,7 @@ vector<Process> parseCommand(const CommandInfo& cmdInfo) {
     return processList;
 }
 
-bool build_in_command(const CommandInfo& cmdInfo) {
+bool builtInCommand(const CommandInfo &cmdInfo) {
     if (cmdInfo.cmdList[0] == "setenv") {
         // TODO: input validation (not in spec but better to have it) -- by newb1er
         if (cmdInfo.cmdList.size() != 3) {
@@ -133,7 +133,7 @@ bool build_in_command(const CommandInfo& cmdInfo) {
             cerr << "Invalid number of arguments for printenv command." << endl;
             return false;
         }
-        const char* env = getenv(cmdInfo.cmdList[1].c_str());
+        const char *env = getenv(cmdInfo.cmdList[1].c_str());
         if (env != NULL) {
             cout << env << endl;
         }
@@ -147,8 +147,8 @@ bool build_in_command(const CommandInfo& cmdInfo) {
     return true;
 }
 
-void execute(const Process& process) {
-    char* argv[process.args.size() + 1];
+void execute(const Process &process) {
+    char *argv[process.args.size() + 1];
     for (int i = 0; i < process.args.size(); i++) {
         if (process.args[i] == "<") { // Implement "<" -- for demo
             int fd = open(process.args[i + 1].c_str(), O_RDONLY);
@@ -163,7 +163,7 @@ void execute(const Process& process) {
             argv[i] = NULL;
         }
         else {
-            argv[i] = (char*)process.args[i].c_str();
+            argv[i] = (char *)process.args[i].c_str();
         }
     }
     argv[process.args.size()] = NULL;
@@ -175,7 +175,7 @@ void execute(const Process& process) {
 }
 
 // Find if there is a number pipe to pass to this command
-int findPipeCmdId(const vector<CommandInfo>& commands, int i) {
+int findPipeCmdId(const vector<CommandInfo> &commands, int i) {
     for (int np = 0; np < numPipeList.size(); np++) {
         if (numPipeList[np].pipeCmdId == commands[i].cmdId) {
             return np;
@@ -184,10 +184,10 @@ int findPipeCmdId(const vector<CommandInfo>& commands, int i) {
     return -1;
 }
 
-void executeProcess(vector<Process>& processList, int cmdId, bool isNumPipeInput, int numPipeIndex) {
+void executeProcess(vector<Process> &processList, int cmdId, bool isNumPipeInput, int numPipeIndex) {
     pid_t pid;
-    int pipefd[2][2]; // pipefd[0] for odd process, pipefd[1] for even process
-    for (int j = 0; j < processList.size(); j++) { // for each process
+    int pipefd[2][2];                                                    // pipefd[0] for odd process, pipefd[1] for even process
+    for (int j = 0; j < processList.size(); j++) {                       // for each process
         if (processList[j].isNumberedPipe || processList[j].isErrPipe) { // create numbered pipe
             int numPipeCmdId = cmdId + processList[j].pipeNumber;
 
@@ -208,7 +208,7 @@ void executeProcess(vector<Process>& processList, int cmdId, bool isNumPipeInput
                 processList[j].to = numPipeList[numPipeList.size() - 1].numPipefd;
             }
         }
-        if (j == 0 && isNumPipeInput/* There is a number pipe to write to*/) {
+        if (j == 0 && isNumPipeInput /* There is a number pipe to write to*/) {
             processList[j].from = numPipeList[numPipeIndex].numPipefd; // read from number pipe
         }
         if (j > 0) {
@@ -223,7 +223,7 @@ void executeProcess(vector<Process>& processList, int cmdId, bool isNumPipeInput
             waitpid(-1, NULL, 0);
         }
 
-        if (pid == 0) { // child process
+        if (pid == 0) {                       // child process
             auto process = processList.at(j); // by newb1er
             if (process.to != nullptr) {
                 close(process.to[0]);
@@ -241,7 +241,8 @@ void executeProcess(vector<Process>& processList, int cmdId, bool isNumPipeInput
             execute(process);
         }
         else { // parent process
-            while (waitpid(-1, NULL, WNOHANG)); // wait for all child processes to finish (non-blocking waitpid())
+            while (waitpid(-1, NULL, WNOHANG))
+                ; // wait for all child processes to finish (non-blocking waitpid())
 
             if (j == 0 && isNumPipeInput) { // close number pipe
                 close(numPipeList[numPipeIndex].numPipefd[0]);
@@ -262,12 +263,12 @@ void executeProcess(vector<Process>& processList, int cmdId, bool isNumPipeInput
 }
 
 // Function to execute each command
-void executeCommand(const vector<CommandInfo>& commands) {
+void executeCommand(const vector<CommandInfo> &commands) {
     for (int i = 0; i < commands.size(); i++) { // for each command
-        if (build_in_command(commands[i])) {
+        if (builtInCommand(commands[i])) {
             continue;
         }
-        
+
         vector<Process> processList = parseCommand(commands[i]);
 
         bool isNumPipeInput = false;
@@ -302,7 +303,7 @@ int main(int argc, char *argv[]) {
     setenv("PATH", "bin:.", 1);
 
     int serverSocketfd; // master socket file descriptor
-    int newSocketfd; // slave socket file descriptor
+    int newSocketfd;    // slave socket file descriptor
     struct sockaddr_in serverAddr;
     struct sockaddr_in clientAddr;
     socklen_t addr_size = sizeof(sockaddr_in);
@@ -326,7 +327,7 @@ int main(int argc, char *argv[]) {
     }
 
     // Bind the address struct to the socket
-    if (bind(serverSocketfd, (struct sockaddr*)&serverAddr, sizeof(serverAddr)) < 0) {
+    if (bind(serverSocketfd, (struct sockaddr *)&serverAddr, sizeof(serverAddr)) < 0) {
         cerr << "Error: server can't bind local address" << endl;
     }
 
@@ -337,7 +338,7 @@ int main(int argc, char *argv[]) {
 
     while (true) {
         // Accept call creates a new socket for the incoming connection
-        newSocketfd = accept(serverSocketfd, (struct sockaddr*)&clientAddr, &addr_size);
+        newSocketfd = accept(serverSocketfd, (struct sockaddr *)&clientAddr, &addr_size);
         if (newSocketfd < 0) {
             cerr << "Error: server can't accept client connection" << endl;
         }
