@@ -30,9 +30,10 @@ struct NumberedPipe {
 };
 
 struct UserPipeInfo {
-    int senderId = -1;    // sender
-    int receiverId = -1;  // receiver
-    int fd[2] = {-1, -1}; // 0: readfd, 1: writefd
+    int senderId = -1;         // sender
+    int receiverId = -1;       // receiver
+    int readfd[2] = {-1, -1};  // read from user pipe
+    int writefd[2] = {-1, -1}; // write to user pipe
 };
 
 struct CommandInfo {
@@ -193,7 +194,7 @@ void userPipeInMessage(int sourceId, UserInfo *user, const string &cmd, Process 
     }
     else {
         if (userList[sourceId].isLogin && readfdList[sourceId] != 0) { // user pipe exists
-            process->userPipe.fd[0] = readfdList[sourceId];
+            process->userPipe.readfd[0] = readfdList[sourceId];
             readfdList[sourceId] = 0;
             process->userPipe.senderId = sourceId;
             // broadcast message
@@ -218,15 +219,15 @@ void userPipeOutMessage(int targetId, UserInfo *user, const string &cmd, Process
             process->isUserPipeToErr = true;
             cout << "*** Error: the pipe #" << user->id << "->#" + to_string(targetId) << " already exists. ***\n";
         }
-        else { // user pipe does not exist
-            userList[targetId].senderId = user->id;
+        else {                                      // user pipe does not exist
+            userList[targetId].senderId = user->id; // 可能會有 semaphore 問題 (要改)
             kill(userList[targetId].pid, SIGUSR2);
             // create a new user pipe
             int writefd = open(userPipeFileName.c_str(), O_WRONLY);
             if (writefd < 0) {
                 cerr << "Error: failed to open writefd for user pipe" << endl;
             }
-            process->userPipe.fd[1] = writefd;
+            process->userPipe.writefd[1] = writefd;
             process->userPipe.receiverId = targetId;
             // broadcast message
             string msg = "*** " + string(userList[user->id].name) + " (#" + to_string(user->id) + ") just piped '" + cmd + "' to " + userList[targetId].name + " (#" + to_string(targetId) + ") ***\n";
@@ -478,10 +479,10 @@ bool hasUserPipe(const Process &process) {
 // Link user pipe
 void linkUserPipe(Process *process) {
     if (process->userPipe.senderId != -1) {
-        process->from = process->userPipe.fd; // read from user pipe
+        process->from = process->userPipe.readfd; // read from user pipe
     }
     if (process->userPipe.receiverId != -1) {
-        process->to = process->userPipe.fd; // write to user pipe
+        process->to = process->userPipe.writefd; // write to user pipe
     }
     // Error handling
     if (process->isUserPipeFromErr) {
@@ -563,7 +564,7 @@ void executeProcess(UserInfo *user, vector<Process> &processList, const string &
                 close(numPipeList[numPipeIndex].numPipefd[1]);
             }
             if (j == 0 && process.userPipe.senderId != -1) { // close user pipe
-                close(process.userPipe.fd[0]);
+                close(process.userPipe.readfd[0]);
                 string userPipeFileName = "user_pipe/" + to_string(process.userPipe.senderId) + "_" + to_string(user->id);
                 if (unlink(userPipeFileName.c_str()) < 0) {
                     cerr << "Error: failed to unlink user pipe" << endl;
@@ -574,7 +575,7 @@ void executeProcess(UserInfo *user, vector<Process> &processList, const string &
                 close(pipefd[(j - 1) % 2][1]);
             }
             if (j == processList.size() - 1 && process.userPipe.receiverId != -1) { // close user pipe
-                close(process.userPipe.fd[1]);
+                close(process.userPipe.writefd[1]);
             }
         }
     }
