@@ -9,6 +9,7 @@
 #include <string>
 #include <sys/shm.h> // add
 #include <sys/socket.h>
+#include <sys/stat.h> // add
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -28,10 +29,10 @@ struct NumberedPipe {
     int numPipefd[2];
 };
 
-struct UserPipe {
-    int fromId; // sender
-    int toId;   // receiver
-    int userPipefd[2];
+struct UserPipeInfo {
+    int senderId = -1;    // sender
+    int receiverId = -1;  // receiver
+    int fd[2] = {-1, -1}; // 0: readfd, 1: writefd
 };
 
 struct CommandInfo {
@@ -46,8 +47,7 @@ struct Process {
     bool isErrPipe = false;
     bool isUserPipeToErr = false;   // the user does not exist or the user pipe already exits (>999)
     bool isUserPipeFromErr = false; // the user does not exist or the user pipe does not exist (<998)
-    int userPipeFromIndex = -1;     // user pipe index in userPipeList (for reading and closing user pipe)
-    int userPipeToIndex = -1;       // user pipe index in userPipeList (for creating user pipe)
+    UserPipeInfo userPipe;          // record this process's user pipe behavior
     int pipeNumber;
     int *to = nullptr;
     int *from = nullptr;
@@ -59,6 +59,7 @@ struct UserInfo {
     char name[25];
     char ipPort[25];
     pid_t pid;
+    int senderId; // store the sender which wants to send message to this user (user pipe)
 };
 
 struct BroadcastMsg {
@@ -70,7 +71,7 @@ UserInfo *userList;
 BroadcastMsg *shm_broadcast;
 
 // FIFO
-vector<UserPipe> userPipeList; // store user pipe
+int readfdList[MAXUSER + 1]; // store readfd for user pipe (who wants to send message to this user)
 
 int cmdCount;                     // count the number of commands
 vector<NumberedPipe> numPipeList; // store numbered pipe
@@ -90,6 +91,21 @@ void signalBroadcast(int signo) {
     cout << shm_broadcast->msg << flush;
 }
 
+void signalOpenFIFO(int signo) {
+    for (int i = 1; i <= MAXUSER; i++) {
+        if (userList[i].isLogin && userList[i].senderId != -1) {
+            string userPipeFileName = "user_pipe/" + to_string(userList[i].senderId) + "_" + to_string(i);
+            int readfd = open(userPipeFileName.c_str(), O_RDONLY);
+            if (readfd < 0) {
+                cerr << "Error: failed to open readfd for user pipe" << endl;
+            }
+            readfdList[userList[i].senderId] = readfd;
+            userList[i].senderId = -1;
+            break;
+        }
+    }
+}
+
 // Function to broadcast message to all users
 void broadcastMessage(const string &msg) {
     memset(shm_broadcast->msg, 0, MAXBUFSIZE);
@@ -99,6 +115,7 @@ void broadcastMessage(const string &msg) {
             kill(userList[idx].pid, SIGUSR1);
         }
     }
+    usleep(2000);
 }
 
 void initUserInfos(int idx) {
@@ -107,14 +124,18 @@ void initUserInfos(int idx) {
     strcpy(userList[idx].name, "(no name)");
     strcpy(userList[idx].ipPort, "");
     userList[idx].pid = -1;
+    userList[idx].senderId = -1;
 }
 
 void deleteUserPipe(int id) {
-    for (int i = 0; i < userPipeList.size(); i++) {
-        if (userPipeList[i].fromId == id || userPipeList[i].toId == id) {
-            close(userPipeList[i].userPipefd[0]);
-            close(userPipeList[i].userPipefd[1]);
-            userPipeList.erase(userPipeList.begin() + i);
+    for (int i = 1; i <= MAXUSER; i++) {
+        string userPipeFileName = "user_pipe/" + to_string(id) + "_" + to_string(i);
+        if (unlink(userPipeFileName.c_str()) < 0 && errno != ENOENT) { // ENOENT: No such file or directory
+            cerr << "Error: failed to unlink user pipe" << endl;
+        }
+        userPipeFileName = "user_pipe/" + to_string(i) + "_" + to_string(id);
+        if (unlink(userPipeFileName.c_str()) < 0 && errno != ENOENT) {
+            cerr << "Error: failed to unlink user pipe" << endl;
         }
     }
 }
@@ -150,6 +171,8 @@ tuple<int, int> userLogin(int msock) {
             return {ssock, userList[idx].id};
         }
     }
+
+    return {-1, -1};
 }
 
 void userLogout(int userIndex) {
@@ -169,17 +192,15 @@ void userPipeInMessage(int sourceId, UserInfo *user, const string &cmd, Process 
         cout << "*** Error: user #" << sourceId << " does not exist yet. ***\n";
     }
     else {
-        bool isUserPipeExist = false;
-        for (int upIdx = 0; upIdx < userPipeList.size(); upIdx++) {
-            if (userPipeList[upIdx].toId == user->id && userPipeList[upIdx].fromId == sourceId) { // user pipe exists
-                string msg = "*** " + string(userList[user->id].name) + " (#" + to_string(user->id) + ") just received from " + userList[sourceId].name + " (#" + to_string(sourceId) + ") by '" + cmd + "' ***\n";
-                broadcastMessage(msg);
-                isUserPipeExist = true;
-                process->userPipeFromIndex = upIdx;
-                break;
-            }
+        if (userList[sourceId].isLogin && readfdList[sourceId] != 0) { // user pipe exists
+            process->userPipe.fd[0] = readfdList[sourceId];
+            readfdList[sourceId] = 0;
+            process->userPipe.senderId = sourceId;
+            // broadcast message
+            string msg = "*** " + string(userList[user->id].name) + " (#" + to_string(user->id) + ") just received from " + userList[sourceId].name + " (#" + to_string(sourceId) + ") by '" + cmd + "' ***\n";
+            broadcastMessage(msg);
         }
-        if (!isUserPipeExist) { // user pipe does not exist
+        else { // user pipe does not exist
             process->isUserPipeFromErr = true;
             cout << "*** Error: the pipe #" << sourceId << "->#" << user->id << " does not exist yet. ***\n";
         }
@@ -192,23 +213,21 @@ void userPipeOutMessage(int targetId, UserInfo *user, const string &cmd, Process
         cout << "*** Error: user #" << targetId << " does not exist yet. ***\n";
     }
     else {
-        bool isUserPipeExist = false;
-        for (int i = 0; i < userPipeList.size(); i++) {
-            if (userPipeList[i].fromId == user->id && userPipeList[i].toId == targetId) { // user pipe exists
-                process->isUserPipeToErr = true;
-                cout << "*** Error: the pipe #" << user->id << "->#" + to_string(targetId) << " already exists. ***\n";
-                isUserPipeExist = true;
-                break;
-            }
+        string userPipeFileName = "user_pipe/" + to_string(user->id) + "_" + to_string(targetId);
+        if (mknod(userPipeFileName.c_str(), S_IFIFO | PERMS, 0) < 0) { // user pipe already exists
+            process->isUserPipeToErr = true;
+            cout << "*** Error: the pipe #" << user->id << "->#" + to_string(targetId) << " already exists. ***\n";
         }
-        if (!isUserPipeExist) { // user pipe does not exist
+        else { // user pipe does not exist
+            userList[targetId].senderId = user->id;
+            kill(userList[targetId].pid, SIGUSR2);
             // create a new user pipe
-            UserPipe userPipe;
-            userPipe.fromId = user->id;
-            userPipe.toId = targetId;
-            pipe(userPipe.userPipefd);
-            userPipeList.push_back(userPipe);
-            process->userPipeToIndex = userPipeList.size() - 1;
+            int writefd = open(userPipeFileName.c_str(), O_WRONLY);
+            if (writefd < 0) {
+                cerr << "Error: failed to open writefd for user pipe" << endl;
+            }
+            process->userPipe.fd[1] = writefd;
+            process->userPipe.receiverId = targetId;
             // broadcast message
             string msg = "*** " + string(userList[user->id].name) + " (#" + to_string(user->id) + ") just piped '" + cmd + "' to " + userList[targetId].name + " (#" + to_string(targetId) + ") ***\n";
             broadcastMessage(msg);
@@ -458,11 +477,11 @@ bool hasUserPipe(const Process &process) {
 
 // Link user pipe
 void linkUserPipe(Process *process) {
-    if (process->userPipeFromIndex != -1) {
-        process->from = userPipeList[process->userPipeFromIndex].userPipefd; // read from user pipe
+    if (process->userPipe.senderId != -1) {
+        process->from = process->userPipe.fd; // read from user pipe
     }
-    if (process->userPipeToIndex != -1) {
-        process->to = userPipeList[process->userPipeToIndex].userPipefd; // write to user pipe
+    if (process->userPipe.receiverId != -1) {
+        process->to = process->userPipe.fd; // write to user pipe
     }
     // Error handling
     if (process->isUserPipeFromErr) {
@@ -543,20 +562,25 @@ void executeProcess(UserInfo *user, vector<Process> &processList, const string &
                 close(numPipeList[numPipeIndex].numPipefd[0]);
                 close(numPipeList[numPipeIndex].numPipefd[1]);
             }
-            if (j == 0 && process.userPipeFromIndex != -1) { // close user pipe
-                close(userPipeList[process.userPipeFromIndex].userPipefd[0]);
-                close(userPipeList[process.userPipeFromIndex].userPipefd[1]);
-                userPipeList.erase(userPipeList.begin() + process.userPipeFromIndex);
+            if (j == 0 && process.userPipe.senderId != -1) { // close user pipe
+                close(process.userPipe.fd[0]);
+                string userPipeFileName = "user_pipe/" + to_string(process.userPipe.senderId) + "_" + to_string(user->id);
+                if (unlink(userPipeFileName.c_str()) < 0) {
+                    cerr << "Error: failed to unlink user pipe" << endl;
+                }
             }
             if (j > 0) { // close pipe
                 close(pipefd[(j - 1) % 2][0]);
                 close(pipefd[(j - 1) % 2][1]);
             }
+            if (j == processList.size() - 1 && process.userPipe.receiverId != -1) { // close user pipe
+                close(process.userPipe.fd[1]);
+            }
         }
     }
 
     // if the last process is number pipe or user pipe -> shouldn't wait
-    if (processList.back().isNumberedPipe || processList.back().userPipeToIndex != -1) {
+    if (processList.back().isNumberedPipe || processList.back().userPipe.receiverId != -1) {
         usleep(50000);
         return;
     }
@@ -668,15 +692,17 @@ void createSharedMemory() {
 }
 
 int main(int argc, char *argv[]) {
-    // set the capacity of user pipe list
-    userPipeList.reserve(500);
-
     // initial /dev/null
     fd_null[0] = open("/dev/null", O_RDWR);
     fd_null[1] = open("/dev/null", O_RDWR);
 
+    // initial readfdList
+    memset(readfdList, 0, sizeof(readfdList));
+
+    // Set signal handler
     signal(SIGINT, signalTerminate);
     signal(SIGUSR1, signalBroadcast);
+    signal(SIGUSR2, signalOpenFIFO);
 
     // Create a passive TCP socket and get its file descriptor (msock)
     int msock = passiveTCP(atoi(argv[1]));
