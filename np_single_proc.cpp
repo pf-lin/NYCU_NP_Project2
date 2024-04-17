@@ -523,6 +523,9 @@ int getUserIndex(int fd) {
 }
 
 int shell(int fd) {
+    // prevent zombie process
+    signal(SIGCHLD, signalChild);
+
     char buf[MAXBUFSIZE];
     memset(buf, 0, sizeof(buf));
     int n = read(fd, buf, sizeof(buf));
@@ -684,8 +687,8 @@ int main(int argc, char *argv[]) {
     fd_null[0] = open("/dev/null", O_RDWR);
     fd_null[1] = open("/dev/null", O_RDWR);
 
-    // prevent zombie process
-    signal(SIGCHLD, signalChild);
+    // // prevent zombie process
+    // signal(SIGCHLD, signalChild);
 
     // Create a passive TCP socket and get its file descriptor (msock)
     int msock = passiveTCP(atoi(argv[1]));
@@ -716,7 +719,9 @@ int main(int argc, char *argv[]) {
 
         // Wait for activity on any of the sockets
         if (select(nfds, &rfds, NULL, NULL, NULL) < 0) { // 直到有訊息進來才會繼續 (system call)
-            cerr << "Error in select" << endl;
+            if (errno != EINTR) {
+                cerr << "Error in select, errno: " << errno << endl;
+            }
             continue; // may be interrupted by signal or other errors -> select again
         }
 
