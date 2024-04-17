@@ -68,6 +68,8 @@ struct BroadcastMsg {
 };
 
 // share memory
+int shmid_userInfo = -1;
+int shmid_message = -1;
 UserInfo *userList;
 BroadcastMsg *shm_broadcast;
 
@@ -82,9 +84,16 @@ const string welcomeMessage = "****************************************\n"
                               "** Welcome to the information server. **\n"
                               "****************************************\n";
 
+void signalChild(int signo) {
+    while (waitpid(-1, NULL, WNOHANG) > 0)
+        ; // wait for all child processes to finish (non-blocking waitpid())
+}
+
 void signalTerminate(int signo) {
-    shmctl(SHMKEY_USERINFO, IPC_RMID, 0);
-    shmctl(SHMKEY_MESSAGE, IPC_RMID, 0);
+    shmdt(userList);
+    shmdt(shm_broadcast);
+    shmctl(shmid_userInfo, IPC_RMID, (struct shmid_ds *)0); // remove shared memory (user information)
+    shmctl(shmid_message, IPC_RMID, (struct shmid_ds *)0);  // remove shared memory (broadcast message)
     exit(0);
 }
 
@@ -184,6 +193,8 @@ void userLogout(int userIndex) {
         deleteUserPipe(userIndex);
         shmdt(userList);
         shmdt(shm_broadcast);
+        shmctl(shmid_userInfo, IPC_RMID, (struct shmid_ds *)0); // remove shared memory (user information)
+        shmctl(shmid_message, IPC_RMID, (struct shmid_ds *)0);  // remove shared memory (broadcast message)
     }
 }
 
@@ -672,7 +683,7 @@ int passiveTCP(int port) {
 
 void createSharedMemory() {
     // Create shared memory for user information
-    int shmid_userInfo = shmget(SHMKEY_USERINFO, sizeof(UserInfo) * (MAXUSER + 1), PERMS | IPC_CREAT);
+    shmid_userInfo = shmget(SHMKEY_USERINFO, sizeof(UserInfo) * (MAXUSER + 1), PERMS | IPC_CREAT);
     if (shmid_userInfo < 0) {
         cerr << "Error: failed to create shared memory for user information" << endl;
     }
@@ -682,7 +693,7 @@ void createSharedMemory() {
     }
 
     // Create shared memory for broadcast message
-    int shmid_message = shmget(SHMKEY_MESSAGE, sizeof(BroadcastMsg), PERMS | IPC_CREAT);
+    shmid_message = shmget(SHMKEY_MESSAGE, sizeof(BroadcastMsg), PERMS | IPC_CREAT);
     if (shmid_message < 0) {
         cerr << "Error: failed to create shared memory for broadcast message" << endl;
     }
@@ -701,6 +712,7 @@ int main(int argc, char *argv[]) {
     memset(readfdList, 0, sizeof(readfdList));
 
     // Set signal handler
+    signal(SIGCHLD, signalChild); // prevent zombie process
     signal(SIGINT, signalTerminate);
     signal(SIGUSR1, signalBroadcast);
     signal(SIGUSR2, signalOpenFIFO);
