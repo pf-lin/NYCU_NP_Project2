@@ -70,6 +70,11 @@ const string welcomeMessage = "****************************************\n"
                               "** Welcome to the information server. **\n"
                               "****************************************\n";
 
+void signalChild(int signo) {
+    while (waitpid(-1, NULL, WNOHANG) > 0)
+        ; // wait for all child processes to finish (non-blocking waitpid())
+}
+
 // Function to broadcast message to all users
 void broadcastMessage(const string &msg) {
     for (int idx = 1; idx <= MAXUSER; idx++) {
@@ -678,6 +683,9 @@ int main(int argc, char *argv[]) {
     // initial /dev/null
     fd_null[0] = open("/dev/null", O_RDWR);
     fd_null[1] = open("/dev/null", O_RDWR);
+
+    // prevent zombie process
+    signal(SIGCHLD, signalChild);
 
     // Create a passive TCP socket and get its file descriptor (msock)
     int msock = passiveTCP(atoi(argv[1]));

@@ -37,6 +37,11 @@ struct Process {
 int cmdCount = 0;                      // count the number of commands
 vector<NumberedPipe> numPipeList = {}; // store numbered pipe
 
+void signalChild(int signo) {
+    while (waitpid(-1, NULL, WNOHANG) > 0)
+        ; // wait for all child processes to finish (non-blocking waitpid())
+}
+
 // Use number pipe to classify cmd
 vector<CommandInfo> splitCommand(const string &command) {
     // Split the command by ' ' (space)
@@ -282,6 +287,9 @@ void executeCommand(const vector<CommandInfo> &commands) {
 }
 
 int shell() {
+    // prevent zombie process
+    signal(SIGCHLD, signalChild);
+
     string input;
     vector<CommandInfo> commands;
 
@@ -301,6 +309,9 @@ int shell() {
 int main(int argc, char *argv[]) {
     // initial PATH is bin/ and ./
     setenv("PATH", "bin:.", 1);
+
+    // prevent zombie process
+    signal(SIGCHLD, signalChild);
 
     int serverSocketfd; // master socket file descriptor
     int newSocketfd;    // slave socket file descriptor
