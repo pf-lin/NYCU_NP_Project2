@@ -187,6 +187,7 @@ tuple<int, int> userLogin(int msock) {
 
 void userLogout(int userIndex) {
     if (userIndex != -1) {
+        userList[userIndex].isLogin = false; // logout (can't send message to the user who left)
         string msg = "*** User '" + string(userList[userIndex].name) + "' left. ***\n";
         broadcastMessage(msg);
         initUserInfos(userIndex);

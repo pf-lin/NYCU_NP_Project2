@@ -672,6 +672,7 @@ void userLogout(int fd) {
     // Find the user index
     int userIndex = getUserIndex(fd);
     if (userIndex != -1) {
+        userList[userIndex].isLogin = false; // logout (can't send message to the user who left)
         string msg = "*** User '" + userList[userIndex].name + "' left. ***\n";
         broadcastMessage(msg);
         initUserInfos(userIndex);
