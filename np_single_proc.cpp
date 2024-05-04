@@ -244,6 +244,15 @@ vector<Process> parseCommand(const CommandInfo &cmdInfo) {
     return processList;
 }
 
+bool isDigit(const string &str) {
+    for (char c : str) {
+        if (!isdigit(c)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 bool builtInCommand(UserInfo *user, const CommandInfo &cmdInfo) {
     if (cmdInfo.cmdList[0] == "setenv") {
         // TODO: input validation (not in spec but better to have it) -- by newb1er
@@ -283,9 +292,24 @@ bool builtInCommand(UserInfo *user, const CommandInfo &cmdInfo) {
         write(user->fd, msg.c_str(), msg.size());
     }
     else if (cmdInfo.cmdList[0] == "tell") {
-        int targetId = stoi(cmdInfo.cmdList[1]);
+        int targetId = -1;
+        if (isDigit(cmdInfo.cmdList[1])) {
+            targetId = stoi(cmdInfo.cmdList[1]);
+        }
+        else { // find the target user by name (for demo)
+            for (int idx = 1; idx <= MAXUSER; idx++) {
+                if (userList[idx].isLogin && userList[idx].name == cmdInfo.cmdList[1]) {
+                    targetId = idx;
+                    break;
+                }
+            }
+        }
         string msg = "";
-        if (!userList[targetId].isLogin) { // the target user does not exist
+        if (targetId == -1) { // the target user does not exist (tell <name>)
+            msg += "*** Error: user '" + cmdInfo.cmdList[1] + "' does not exist. ***\n";
+            write(user->fd, msg.c_str(), msg.size());
+        }
+        else if (!userList[targetId].isLogin) { // the target user does not exist (tell <id>)
             msg += "*** Error: user #" + to_string(targetId) + " does not exist yet. ***\n";
             write(user->fd, msg.c_str(), msg.size());
         }
